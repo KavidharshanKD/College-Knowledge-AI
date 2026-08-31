@@ -34,15 +34,38 @@ class ProcessedChunk:
             "category": self.category,
             "filepath": self.filepath,
             "page_number": int(self.page_number),
-            "chunk_index": int(self.chunk_index),
+            "chunk_index": int(self.chunk_index)
         }
 
 
 class DocumentProcessor:
 
-    def __init__(self, chunk_size: int = None, chunk_overlap: int = None):
-        self.chunk_size = chunk_size or settings.CHUNK_SIZE
-        self.chunk_overlap = chunk_overlap or settings.CHUNK_OVERLAP
+    def __init__(
+        self,
+        chunk_size: int = None,
+        chunk_overlap: int = None
+    ):
+        self.chunk_size = (
+            chunk_size
+            if chunk_size is not None
+            else settings.CHUNK_SIZE
+        )
+
+        self.chunk_overlap = (
+            chunk_overlap
+            if chunk_overlap is not None
+            else settings.CHUNK_OVERLAP
+        )
+
+        # Prevent invalid chunk settings
+        if self.chunk_size <= 0:
+            self.chunk_size = 1000
+
+        if self.chunk_overlap < 0:
+            self.chunk_overlap = 0
+
+        if self.chunk_overlap >= self.chunk_size:
+            self.chunk_overlap = self.chunk_size // 5
 
         self._rapid_ocr = None
 
@@ -51,71 +74,72 @@ class DocumentProcessor:
     # ============================================================
 
     def clean_text(self, text: str) -> str:
+
         if not text:
             return ""
 
         text = text.replace("\xa0", " ")
         text = text.replace("\u200b", "")
+        text = text.replace("\r\n", "\n")
+        text = text.replace("\r", "\n")
 
+        # Remove excessive spaces/tabs
         text = re.sub(r"[ \t]+", " ", text)
+
+        # Remove excessive blank lines
         text = re.sub(r"\n\s*\n+", "\n\n", text)
 
         return text.strip()
 
     # ============================================================
-    # RAPIDOCR
+    # OCR
     # ============================================================
-
-    def _get_ocr(self):
-        if self._rapid_ocr is None:
-            from rapidocr_onnxruntime import RapidOCR
-            self._rapid_ocr = RapidOCR()
-
-        return self._rapid_ocr
 
     def _perform_ocr_on_page(self, page) -> str:
         """
-        Fast OCR for scanned PDF pages.
+        Try local RapidOCR for scanned PDF pages.
 
-        Important:
-        - Low rendering DPI keeps OCR fast.
-        - Image is limited in size.
-        - OCR failure on one page does not stop ingestion.
+        OCR failure will not stop the entire ingestion process.
         """
 
         try:
-            ocr = self._get_ocr()
 
-            # Lower DPI = much faster OCR
+            if self._rapid_ocr is None:
+                from rapidocr_onnxruntime import RapidOCR
+                self._rapid_ocr = RapidOCR()
+
             pix = page.get_pixmap(
-                dpi=72,
-                colorspace=fitz.csRGB,
+                dpi=150,
                 alpha=False
             )
 
-            img = pix.tobytes("png")
+            image_bytes = pix.tobytes("png")
 
-            result, _ = ocr(img)
+            result, _ = self._rapid_ocr(image_bytes)
 
-            if not result:
-                return ""
+            if result:
 
-            lines = []
+                lines = []
 
-            for item in result:
-                if len(item) >= 2:
-                    text = str(item[1]).strip()
+                for item in result:
 
-                    if text:
-                        lines.append(text)
+                    if (
+                        isinstance(item, (list, tuple))
+                        and len(item) >= 2
+                        and item[1]
+                    ):
+                        lines.append(str(item[1]))
 
-            return "\n".join(lines).strip()
+                text = "\n".join(lines).strip()
 
-        except Exception as e:
-            print(
-                f"      OCR failed on page {page.number + 1}: {e}"
-            )
-            return ""
+                if len(text) >= 15:
+                    return text
+
+        except Exception:
+            # OCR is optional.
+            pass
+
+        return ""
 
     # ============================================================
     # PDF EXTRACTION
@@ -128,73 +152,69 @@ class DocumentProcessor:
 
         pages_content = []
 
-        doc = None
-
         try:
-            doc = fitz.open(pdf_path)
 
-            total_pages = len(doc)
+            with fitz.open(pdf_path) as pdf:
 
-            print(
-                f"      PDF pages: {total_pages}"
-            )
+                for page_index in range(len(pdf)):
 
-            for page_num in range(total_pages):
+                    page = pdf[page_index]
 
-                page = doc[page_num]
+                    text = page.get_text("text") or ""
+                    cleaned = self.clean_text(text)
 
-                # ------------------------------------------------
-                # FIRST: Normal text extraction
-                # ------------------------------------------------
+                    # OCR only if normal extraction failed
+                    if len(cleaned) < 20:
 
-                raw_text = page.get_text("text")
-                text = self.clean_text(raw_text)
+                        ocr_text = self._perform_ocr_on_page(page)
 
-                # ------------------------------------------------
-                # SECOND: OCR only when page has no useful text
-                # ------------------------------------------------
+                        if ocr_text:
+                            cleaned = self.clean_text(ocr_text)
 
-                if len(text) < 20:
+                    if cleaned:
 
-                    print(
-                        f"      OCR page {page_num + 1}/{total_pages}...",
-                        end=" ",
-                        flush=True
-                    )
+                        pages_content.append(
+                            {
+                                "page_number": page_index + 1,
+                                "text": cleaned
+                            }
+                        )
 
-                    text = self.clean_text(
-                        self._perform_ocr_on_page(page)
-                    )
+        except Exception as pdf_error:
 
-                    if text:
-                        print("OK")
-                    else:
-                        print("NO TEXT")
+            # Fallback to pypdf
+            try:
 
-                if text:
+                from pypdf import PdfReader
 
-                    pages_content.append(
-                        {
-                            "page_number": page_num + 1,
-                            "text": text,
-                        }
-                    )
+                reader = PdfReader(pdf_path)
 
-            return pages_content
+                for page_index, page in enumerate(reader.pages):
 
-        except Exception as e:
+                    text = page.extract_text() or ""
+                    cleaned = self.clean_text(text)
 
-            raise RuntimeError(
-                f"Failed to process PDF '{pdf_path}': {e}"
-            )
+                    if cleaned:
 
-        finally:
+                        pages_content.append(
+                            {
+                                "page_number": page_index + 1,
+                                "text": cleaned
+                            }
+                        )
 
-            if doc is not None:
-                doc.close()
+            except Exception as fallback_error:
+
+                raise RuntimeError(
+                    f"Failed to extract PDF '{pdf_path}'. "
+                    f"PyMuPDF error: {pdf_error}. "
+                    f"Fallback error: {fallback_error}"
+                )
+
+        return pages_content
 
     # ============================================================
-    # DOCX
+    # DOCX EXTRACTION
     # ============================================================
 
     def extract_text_from_docx(
@@ -202,51 +222,59 @@ class DocumentProcessor:
         docx_path: str
     ) -> List[Dict[str, Any]]:
 
+        pages_content = []
+
         try:
 
-            doc = docx.Document(docx_path)
+            document = docx.Document(docx_path)
 
-            parts = []
+            content = []
 
-            for para in doc.paragraphs:
+            # Paragraphs
+            for paragraph in document.paragraphs:
 
-                text = para.text.strip()
+                text = paragraph.text.strip()
 
                 if text:
-                    parts.append(text)
+                    content.append(text)
 
-            for table in doc.tables:
+            # Tables
+            for table in document.tables:
 
                 for row in table.rows:
 
-                    row_text = " | ".join(
-                        cell.text.strip()
-                        for cell in row.cells
-                        if cell.text.strip()
-                    )
+                    cells = []
 
-                    if row_text:
-                        parts.append(row_text)
+                    for cell in row.cells:
 
-            combined = self.clean_text(
-                "\n".join(parts)
-            )
+                        cell_text = cell.text.strip()
 
-            if not combined:
-                return []
+                        if cell_text:
+                            cells.append(cell_text)
 
-            return [
-                {
-                    "page_number": 1,
-                    "text": combined
-                }
-            ]
+                    if cells:
+                        content.append(" | ".join(cells))
 
-        except Exception as e:
+            combined_text = "\n".join(content)
+
+            cleaned = self.clean_text(combined_text)
+
+            if cleaned:
+
+                pages_content.append(
+                    {
+                        "page_number": 1,
+                        "text": cleaned
+                    }
+                )
+
+        except Exception as error:
 
             raise RuntimeError(
-                f"Failed to process DOCX '{docx_path}': {e}"
+                f"Failed to extract DOCX '{docx_path}': {error}"
             )
+
+        return pages_content
 
     # ============================================================
     # CHUNKING
@@ -259,6 +287,8 @@ class DocumentProcessor:
 
         if not text:
             return []
+
+        text = text.strip()
 
         if len(text) <= self.chunk_size:
             return [text]
@@ -275,9 +305,10 @@ class DocumentProcessor:
                 text_length
             )
 
+            # Last chunk
             if end >= text_length:
 
-                chunk = text[start:].strip()
+                chunk = text[start:end].strip()
 
                 if chunk:
                     chunks.append(chunk)
@@ -286,6 +317,7 @@ class DocumentProcessor:
 
             split_position = -1
 
+            # Prefer natural boundaries
             delimiters = [
                 "\n\n",
                 "\n",
@@ -297,9 +329,8 @@ class DocumentProcessor:
                 " "
             ]
 
-            search_start = (
-                start +
-                int(self.chunk_size * 0.60)
+            search_start = start + int(
+                self.chunk_size * 0.60
             )
 
             for delimiter in delimiters:
@@ -313,13 +344,15 @@ class DocumentProcessor:
                 if position != -1:
 
                     split_position = (
-                        position +
-                        len(delimiter)
+                        position + len(delimiter)
                     )
 
                     break
 
-            if split_position == -1:
+            if (
+                split_position <= start
+                or split_position == -1
+            ):
                 split_position = end
 
             chunk = text[
@@ -329,11 +362,16 @@ class DocumentProcessor:
             if chunk:
                 chunks.append(chunk)
 
-            start = max(
+            # Overlap
+            next_start = (
                 split_position -
-                self.chunk_overlap,
-                start + 1
+                self.chunk_overlap
             )
+
+            if next_start <= start:
+                next_start = split_position
+
+            start = next_start
 
         return chunks
 
@@ -349,34 +387,29 @@ class DocumentProcessor:
 
         path = Path(file_path)
 
+        if not path.exists():
+            raise FileNotFoundError(
+                f"File not found: {file_path}"
+            )
+
         filename = path.name
         extension = path.suffix.lower()
 
-        # --------------------------------------------------------
-        # Extract
-        # --------------------------------------------------------
-
         if extension == ".pdf":
 
-            pages = self.extract_text_from_pdf(
-                file_path
+            pages_data = self.extract_text_from_pdf(
+                str(path)
             )
 
-        elif extension in [".docx", ".doc"]:
+        elif extension == ".docx":
 
-            pages = self.extract_text_from_docx(
-                file_path
+            pages_data = self.extract_text_from_docx(
+                str(path)
             )
 
         else:
 
             return []
-
-        # --------------------------------------------------------
-        # Create chunks
-        # --------------------------------------------------------
-
-        chunks = []
 
         safe_filename = re.sub(
             r"[^a-zA-Z0-9_-]",
@@ -390,11 +423,16 @@ class DocumentProcessor:
             category
         )
 
-        global_index = 0
+        all_chunks = []
 
-        for page in pages:
+        global_chunk_index = 0
 
-            page_number = page["page_number"]
+        for page in pages_data:
+
+            page_number = int(
+                page["page_number"]
+            )
+
             page_text = page["text"]
 
             page_chunks = (
@@ -407,9 +445,7 @@ class DocumentProcessor:
                 page_chunks
             ):
 
-                chunk_text = chunk_text.strip()
-
-                if len(chunk_text) < 20:
+                if len(chunk_text.strip()) < 20:
                     continue
 
                 chunk_id = (
@@ -419,23 +455,21 @@ class DocumentProcessor:
                     f"c{local_index}"
                 )
 
-                chunks.append(
-                    ProcessedChunk(
-                        chunk_id=chunk_id,
-                        text=chunk_text,
-                        document_filename=filename,
-                        category=category,
-                        filepath=str(
-                            path.resolve()
-                        ),
-                        page_number=page_number,
-                        chunk_index=global_index,
-                    )
+                chunk = ProcessedChunk(
+                    chunk_id=chunk_id,
+                    text=chunk_text,
+                    document_filename=filename,
+                    category=category,
+                    filepath=str(path.resolve()),
+                    page_number=page_number,
+                    chunk_index=global_chunk_index
                 )
 
-                global_index += 1
+                all_chunks.append(chunk)
 
-        return chunks
+                global_chunk_index += 1
+
+        return all_chunks
 
 
 document_processor = DocumentProcessor()

@@ -10,20 +10,19 @@ from app.services.document_processor import ProcessedChunk
 
 class VectorStore:
     """
-    ChromaDB vector store for the college RAG system.
-
-    Responsibilities:
-    - Create/open the ChromaDB collection safely
-    - Automatically recover if the collection was deleted
-    - Store document chunks and embeddings
-    - Perform similarity search
-    - Delete chunks belonging to a document
-    - Provide collection statistics
+    ChromaDB vector store for the College AI RAG system.
     """
 
     def __init__(self):
-        persist_dir = Path(settings.CHROMA_PERSIST_DIR)
-        persist_dir.mkdir(parents=True, exist_ok=True)
+
+        persist_dir = Path(
+            settings.CHROMA_PERSIST_DIR
+        )
+
+        persist_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
         self.client = chromadb.PersistentClient(
             path=str(persist_dir),
@@ -33,83 +32,64 @@ class VectorStore:
         )
 
         self.collection = None
+
         self._ensure_collection()
 
     # ============================================================
-    # COLLECTION MANAGEMENT
+    # COLLECTION
     # ============================================================
 
     def _ensure_collection(self):
-        """
-        Always make sure the current collection object is valid.
-
-        This avoids using an old/stale ChromaDB collection reference.
-        """
 
         try:
-            self.collection = self.client.get_or_create_collection(
-                name=settings.CHROMA_COLLECTION_NAME,
-                metadata={"hnsw:space": "cosine"}
+
+            self.collection = (
+                self.client.get_or_create_collection(
+                    name=settings.CHROMA_COLLECTION_NAME,
+                    metadata={
+                        "hnsw:space": "cosine"
+                    }
+                )
             )
 
-            # Verify that the collection actually exists.
             self.collection.count()
 
             return self.collection
 
-        except Exception as exc:
-            error_text = str(exc).lower()
+        except Exception as error:
 
-            if (
-                "does not exist" in error_text
-                or "not found" in error_text
-                or "collection" in error_text
-            ):
-                # Re-create the collection.
-                try:
-                    self.collection = self.client.get_or_create_collection(
-                        name=settings.CHROMA_COLLECTION_NAME,
-                        metadata={"hnsw:space": "cosine"}
-                    )
-                    return self.collection
-                except Exception:
-                    raise
-
-            raise
-
-    def _get_collection(self):
-        """
-        Return a fresh and valid collection reference.
-
-        This is important because another operation may have deleted
-        or recreated the collection.
-        """
-
-        try:
-            collection = self.client.get_collection(
-                name=settings.CHROMA_COLLECTION_NAME
+            print(
+                f"Chroma collection recovery: {error}"
             )
 
-            # Verify the collection is usable.
-            collection.count()
+            self.collection = (
+                self.client.get_or_create_collection(
+                    name=settings.CHROMA_COLLECTION_NAME,
+                    metadata={
+                        "hnsw:space": "cosine"
+                    }
+                )
+            )
 
-            self.collection = collection
-            return collection
+            return self.collection
 
-        except Exception as exc:
-            error_text = str(exc).lower()
+    def _get_collection(self):
 
-            if (
-                "does not exist" in error_text
-                or "not found" in error_text
-                or "collection" in error_text
-            ):
-                return self._ensure_collection()
+        if self.collection is None:
+            return self._ensure_collection()
 
-            raise
+        try:
+
+            self.collection.count()
+
+            return self.collection
+
+        except Exception:
+
+            return self._ensure_collection()
 
     # ============================================================
-    # ADD / UPSERT CHUNKS
+    # ADD / UPDATE CHUNKS
     # ============================================================
 
     def add_chunks(
@@ -117,9 +97,6 @@ class VectorStore:
         chunks: List[ProcessedChunk],
         embeddings: List[List[float]]
     ) -> int:
-        """
-        Add or update document chunks in ChromaDB.
-        """
 
         if not chunks:
             return 0
@@ -128,46 +105,66 @@ class VectorStore:
             return 0
 
         if len(chunks) != len(embeddings):
+
             raise ValueError(
-                "Number of chunks and embeddings must be the same."
+                "Number of chunks and embeddings "
+                "must be the same."
             )
 
         collection = self._get_collection()
 
-        batch_size = 200
+        batch_size = 100
+
         total_added = 0
 
-        for i in range(0, len(chunks), batch_size):
+        for start in range(
+            0,
+            len(chunks),
+            batch_size
+        ):
 
-            chunk_batch = chunks[i:i + batch_size]
-            embedding_batch = embeddings[i:i + batch_size]
-
-            ids = [
-                str(chunk.chunk_id)
-                for chunk in chunk_batch
+            chunk_batch = chunks[
+                start:start + batch_size
             ]
 
-            documents = [
-                str(chunk.text)
-                for chunk in chunk_batch
+            embedding_batch = embeddings[
+                start:start + batch_size
             ]
 
-            metadatas = [
-                chunk.to_metadata()
-                for chunk in chunk_batch
-            ]
+            ids = []
+
+            documents = []
+
+            metadatas = []
 
             clean_embeddings = []
 
-            for embedding in embedding_batch:
-                clean_embedding = [
-                    float(value)
-                    for value in embedding
-                ]
+            for chunk, embedding in zip(
+                chunk_batch,
+                embedding_batch
+            ):
 
-                clean_embeddings.append(clean_embedding)
+                ids.append(
+                    str(chunk.chunk_id)
+                )
+
+                documents.append(
+                    str(chunk.text)
+                )
+
+                metadatas.append(
+                    chunk.to_metadata()
+                )
+
+                clean_embeddings.append(
+                    [
+                        float(value)
+                        for value in embedding
+                    ]
+                )
 
             try:
+
                 collection.upsert(
                     ids=ids,
                     documents=documents,
@@ -175,17 +172,21 @@ class VectorStore:
                     metadatas=metadatas
                 )
 
-            except Exception as exc:
-                error_text = str(exc).lower()
+            except Exception as error:
 
-                # Collection disappeared between _get_collection()
-                # and upsert(). Re-open it and retry once.
+                error_text = str(
+                    error
+                ).lower()
+
                 if (
-                    "does not exist" in error_text
+                    "collection" in error_text
                     or "not found" in error_text
-                    or "collection" in error_text
+                    or "does not exist" in error_text
                 ):
-                    collection = self._ensure_collection()
+
+                    collection = (
+                        self._ensure_collection()
+                    )
 
                     collection.upsert(
                         ids=ids,
@@ -195,6 +196,7 @@ class VectorStore:
                     )
 
                 else:
+
                     raise
 
             total_added += len(chunk_batch)
@@ -212,23 +214,21 @@ class VectorStore:
         category: Optional[str] = None,
         query_text: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Search ChromaDB for relevant chunks.
-
-        Includes lightweight query-aware reranking for:
-        - AIML
-        - Third Year / TY
-        - Syllabus-related queries
-        """
 
         collection = self._get_collection()
-
-        k = top_k or settings.TOP_K_RESULTS
 
         count = collection.count()
 
         if count == 0:
             return []
+
+        k = (
+            top_k
+            if top_k is not None
+            else settings.TOP_K_RESULTS
+        )
+
+        k = max(1, int(k))
 
         fetch_k = min(
             count,
@@ -238,34 +238,19 @@ class VectorStore:
         where_clause = None
 
         if category:
+
             where_clause = {
                 "category": category
             }
 
         try:
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=fetch_k,
-                where=where_clause,
-                include=[
-                    "documents",
-                    "metadatas",
-                    "distances"
-                ]
-            )
 
-        except Exception as exc:
-            error_text = str(exc).lower()
-
-            if (
-                "does not exist" in error_text
-                or "not found" in error_text
-                or "collection" in error_text
-            ):
-                collection = self._ensure_collection()
+            if where_clause:
 
                 results = collection.query(
-                    query_embeddings=[query_embedding],
+                    query_embeddings=[
+                        query_embedding
+                    ],
                     n_results=fetch_k,
                     where=where_clause,
                     include=[
@@ -276,211 +261,343 @@ class VectorStore:
                 )
 
             else:
+
+                results = collection.query(
+                    query_embeddings=[
+                        query_embedding
+                    ],
+                    n_results=fetch_k,
+                    include=[
+                        "documents",
+                        "metadatas",
+                        "distances"
+                    ]
+                )
+
+        except Exception as error:
+
+            error_text = str(
+                error
+            ).lower()
+
+            if (
+                "collection" in error_text
+                or "not found" in error_text
+                or "does not exist" in error_text
+            ):
+
+                collection = (
+                    self._ensure_collection()
+                )
+
+                results = collection.query(
+                    query_embeddings=[
+                        query_embedding
+                    ],
+                    n_results=fetch_k,
+                    include=[
+                        "documents",
+                        "metadatas",
+                        "distances"
+                    ]
+                )
+
+            else:
+
                 raise
 
-        formatted_results = []
-
         if not results:
-            return formatted_results
+            return []
 
-        documents = results.get("documents") or [[]]
-        metadatas = results.get("metadatas") or [[]]
-        distances = results.get("distances") or [[]]
-        ids = results.get("ids") or [[]]
+        documents = (
+            results.get("documents")
+            or [[]]
+        )
+
+        metadatas = (
+            results.get("metadatas")
+            or [[]]
+        )
+
+        distances = (
+            results.get("distances")
+            or [[]]
+        )
+
+        ids = (
+            results.get("ids")
+            or [[]]
+        )
 
         if not documents or not documents[0]:
-            return formatted_results
+            return []
 
         docs = documents[0]
 
         metas = (
             metadatas[0]
-            if metadatas and metadatas[0]
+            if metadatas
+            and metadatas[0]
             else [{} for _ in docs]
         )
 
         dists = (
             distances[0]
-            if distances and distances[0]
+            if distances
+            and distances[0]
             else [0.0 for _ in docs]
         )
 
         chunk_ids = (
             ids[0]
-            if ids and ids[0]
+            if ids
+            and ids[0]
             else ["" for _ in docs]
         )
 
-        # --------------------------------------------------------
-        # QUERY NORMALIZATION
-        # --------------------------------------------------------
-
-        q_lower = (
-            query_text.lower()
+        query = (
+            query_text.lower().strip()
             if query_text
             else ""
         )
 
-        is_aiml = (
-            "aiml" in q_lower
-            or "a i m l" in q_lower
-            or "artificial intelligence" in q_lower
-            or "machine learning" in q_lower
+        # ========================================================
+        # QUERY DETECTION
+        # ========================================================
+
+        is_aiml = any(
+            term in query
+            for term in [
+                "aiml",
+                "a i m l",
+                "artificial intelligence",
+                "machine learning"
+            ]
         )
 
-        is_third_year = (
-            "ty" in q_lower
-            or "third year" in q_lower
-            or "3rd year" in q_lower
-            or "third-year" in q_lower
-            or "semester v" in q_lower
-            or "semester vi" in q_lower
-            or "sem v" in q_lower
-            or "sem vi" in q_lower
+        is_third_year = any(
+            term in query
+            for term in [
+                "ty",
+                "third year",
+                "3rd year",
+                "third-year",
+                "semester v",
+                "semester vi",
+                "sem v",
+                "sem vi"
+            ]
         )
 
-        is_syllabus = (
-            "syllabus" in q_lower
-            or "curriculum" in q_lower
-            or "subjects" in q_lower
-            or "course" in q_lower
-            or "courses" in q_lower
+        is_syllabus = any(
+            term in query
+            for term in [
+                "syllabus",
+                "curriculum",
+                "subjects",
+                "subject",
+                "course",
+                "courses"
+            ]
         )
 
-        # --------------------------------------------------------
-        # RERANK RESULTS
-        # --------------------------------------------------------
+        formatted_results = []
 
-        for doc_text, meta, distance, chunk_id in zip(
+        # ========================================================
+        # RERANK
+        # ========================================================
+
+        for (
+            doc_text,
+            metadata,
+            distance,
+            chunk_id
+        ) in zip(
             docs,
             metas,
             dists,
             chunk_ids
         ):
 
-            meta = meta or {}
+            metadata = metadata or {}
 
-            doc_filename = str(
-                meta.get(
+            document_name = str(
+                metadata.get(
                     "document_filename",
                     ""
                 )
-            ).lower()
-
-            doc_text_lower = str(
-                doc_text
-            ).lower()
-
-            # Chroma cosine distance:
-            # 0 = identical
-            # 1 = less similar
-            # 2 = opposite
-            base_similarity = max(
-                0.0,
-                1.0 - (float(distance) / 2.0)
             )
 
-            adjusted_score = base_similarity
+            document_lower = (
+                document_name.lower()
+            )
 
-            # ----------------------------------------------------
+            text = str(
+                doc_text or ""
+            )
+
+            text_lower = text.lower()
+
+            # Chroma cosine distance
+            # 0 = most similar
+            # 2 = least similar
+
+            distance_value = float(
+                distance
+            )
+
+            similarity = max(
+                0.0,
+                1.0 - (
+                    distance_value / 2.0
+                )
+            )
+
+            adjusted_score = similarity
+
+            # ====================================================
             # AIML BOOST
-            # ----------------------------------------------------
+            # ====================================================
 
             if is_aiml:
 
-                if (
-                    "aiml" in doc_filename
-                    or "aiml" in doc_text_lower
-                    or "artificial intelligence" in doc_text_lower
-                    or "machine learning" in doc_text_lower
+                if any(
+                    term in document_lower
+                    for term in [
+                        "aiml",
+                        "artificial",
+                        "machine"
+                    ]
                 ):
+
                     adjusted_score += 0.20
 
                 if any(
-                    word in doc_filename
-                    for word in [
-                        "mechanical",
-                        "civil",
-                        "chemical",
-                        "electronics"
+                    term in text_lower
+                    for term in [
+                        "aiml",
+                        "artificial intelligence",
+                        "machine learning"
                     ]
                 ):
-                    adjusted_score -= 0.25
 
-            # ----------------------------------------------------
+                    adjusted_score += 0.15
+
+                if any(
+                    term in document_lower
+                    for term in [
+                        "mechanical",
+                        "civil",
+                        "chemical"
+                    ]
+                ):
+
+                    adjusted_score -= 0.20
+
+            # ====================================================
             # THIRD YEAR BOOST
-            # ----------------------------------------------------
+            # ====================================================
 
             if is_third_year:
 
                 if any(
-                    term in doc_filename
+                    term in document_lower
                     for term in [
                         "ty",
                         "third",
-                        "aiml-ty",
-                        "aiml_ty"
+                        "third_year",
+                        "third-year"
                     ]
                 ):
+
                     adjusted_score += 0.20
 
                 if any(
-                    term in doc_text_lower
+                    term in text_lower
                     for term in [
                         "third year",
                         "third-year",
-                        "semester-v",
-                        "semester-vi",
                         "semester v",
-                        "semester vi"
+                        "semester vi",
+                        "semester-v",
+                        "semester-vi"
                     ]
                 ):
+
                     adjusted_score += 0.15
 
-            # ----------------------------------------------------
+            # ====================================================
             # SYLLABUS BOOST
-            # ----------------------------------------------------
+            # ====================================================
 
             if is_syllabus:
 
-                if (
-                    "syllabus" in doc_filename
-                    or "curriculum" in doc_text_lower
-                    or "course code" in doc_text_lower
-                    or "course title" in doc_text_lower
-                    or "course type" in doc_text_lower
+                if any(
+                    term in document_lower
+                    for term in [
+                        "syllabus",
+                        "structure",
+                        "curriculum"
+                    ]
                 ):
+
+                    adjusted_score += 0.10
+
+                if any(
+                    term in text_lower
+                    for term in [
+                        "course code",
+                        "course title",
+                        "course type",
+                        "semester",
+                        "subject"
+                    ]
+                ):
+
                     adjusted_score += 0.10
 
             formatted_results.append(
                 {
                     "chunk_id": chunk_id,
-                    "text": doc_text,
-                    "document_filename": meta.get(
+
+                    "text": text,
+
+                    "document_filename": metadata.get(
                         "document_filename",
                         "Unknown Document"
                     ),
-                    "category": meta.get(
+
+                    "category": metadata.get(
                         "category",
                         "General"
                     ),
-                    "filepath": meta.get(
+
+                    "filepath": metadata.get(
                         "filepath",
                         ""
                     ),
-                    "page_number": meta.get(
-                        "page_number",
-                        1
+
+                    "page_number": int(
+                        metadata.get(
+                            "page_number",
+                            1
+                        )
                     ),
-                    "chunk_index": meta.get(
-                        "chunk_index",
-                        0
+
+                    "chunk_index": int(
+                        metadata.get(
+                            "chunk_index",
+                            0
+                        )
                     ),
-                    "distance": float(distance),
+
+                    "distance": distance_value,
+
                     "similarity_score": round(
-                        base_similarity,
+                        similarity,
                         4
                     ),
+
                     "adjusted_score": round(
                         adjusted_score,
                         4
@@ -488,44 +605,50 @@ class VectorStore:
                 }
             )
 
-        # Highest score first
+        # Highest adjusted score first
         formatted_results.sort(
-            key=lambda item: item["adjusted_score"],
+            key=lambda item: item[
+                "adjusted_score"
+            ],
             reverse=True
         )
 
         return formatted_results[:k]
 
     # ============================================================
-    # DELETE DOCUMENT CHUNKS
+    # DELETE DOCUMENT
     # ============================================================
 
     def delete_by_filename(
         self,
         filename: str
     ):
-        """
-        Delete all chunks belonging to a document.
-        """
 
         collection = self._get_collection()
 
         try:
+
             collection.delete(
                 where={
                     "document_filename": filename
                 }
             )
 
-        except Exception as exc:
-            error_text = str(exc).lower()
+        except Exception as error:
+
+            error_text = str(
+                error
+            ).lower()
 
             if (
-                "does not exist" in error_text
+                "collection" in error_text
                 or "not found" in error_text
-                or "collection" in error_text
+                or "does not exist" in error_text
             ):
-                collection = self._ensure_collection()
+
+                collection = (
+                    self._ensure_collection()
+                )
 
                 collection.delete(
                     where={
@@ -534,6 +657,7 @@ class VectorStore:
                 )
 
             else:
+
                 raise
 
     # ============================================================
@@ -541,75 +665,86 @@ class VectorStore:
     # ============================================================
 
     def count(self) -> int:
-        """
-        Return total number of indexed chunks.
-        """
 
         collection = self._get_collection()
 
-        return collection.count()
+        return int(
+            collection.count()
+        )
 
     # ============================================================
     # STATISTICS
     # ============================================================
 
-    def get_stats(self) -> Dict[str, Any]:
-        """
-        Return statistics about indexed chunks.
-        """
+    def get_stats(
+        self
+    ) -> Dict[str, Any]:
 
         collection = self._get_collection()
 
         total_chunks = collection.count()
 
         if total_chunks == 0:
+
             return {
                 "total_chunks": 0,
+                "total_documents": 0,
                 "categories": {},
-                "documents": []
+                "document_names": []
             }
 
         sample = collection.get(
-            limit=min(total_chunks, 1000),
-            include=["metadatas"]
+            limit=min(
+                total_chunks,
+                5000
+            ),
+            include=[
+                "metadatas"
+            ]
         )
 
-        categories: Dict[str, int] = {}
+        categories = {}
         documents = set()
 
         metadatas = (
             sample.get("metadatas")
-            if sample
-            else None
+            or []
         )
 
-        if metadatas:
+        for metadata in metadatas:
 
-            for metadata in metadatas:
+            metadata = metadata or {}
 
-                metadata = metadata or {}
+            category = metadata.get(
+                "category",
+                "Other"
+            )
 
-                category = metadata.get(
-                    "category",
-                    "Other"
-                )
+            document = metadata.get(
+                "document_filename",
+                "Unknown"
+            )
 
-                document = metadata.get(
-                    "document_filename",
-                    "Unknown"
-                )
+            categories[category] = (
+                categories.get(
+                    category,
+                    0
+                ) + 1
+            )
 
-                categories[category] = (
-                    categories.get(category, 0) + 1
-                )
-
-                documents.add(document)
+            documents.add(
+                document
+            )
 
         return {
             "total_chunks": total_chunks,
-            "total_documents": len(documents),
+            "total_documents": len(
+                documents
+            ),
             "categories": categories,
-            "document_names": sorted(documents)
+            "document_names": sorted(
+                documents
+            )
         }
 
     # ============================================================
@@ -617,33 +752,29 @@ class VectorStore:
     # ============================================================
 
     def clear(self):
-        """
-        Completely clear the ChromaDB collection and recreate it.
-
-        This method is intentionally explicit.
-        It should only be called when a full re-index is required.
-        """
 
         try:
+
             self.client.delete_collection(
                 name=settings.CHROMA_COLLECTION_NAME
             )
-        except Exception as exc:
-            error_text = str(exc).lower()
+
+        except Exception as error:
+
+            error_text = str(
+                error
+            ).lower()
 
             if (
-                "does not exist" not in error_text
-                and "not found" not in error_text
+                "not found" not in error_text
+                and "does not exist" not in error_text
             ):
+
                 raise
 
         self.collection = None
 
         self._ensure_collection()
 
-
-# ================================================================
-# SINGLE VECTOR STORE INSTANCE
-# ================================================================
 
 vector_store = VectorStore()

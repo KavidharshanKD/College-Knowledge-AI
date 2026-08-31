@@ -1,186 +1,859 @@
-import React, { useState, useEffect } from "react";
-import { AuthProvider, useAuth } from "./context/AuthContext";
-import Sidebar from "./components/Sidebar";
-import Header from "./components/Header";
-import ChatArea from "./components/ChatArea";
-import OnboardingModal from "./components/OnboardingModal";
-import SourceModal from "./components/SourceModal";
-import KnowledgeBaseModal from "./components/KnowledgeBaseModal";
-import {
-  getConversations,
-  getConversationDetails,
-  createConversation,
-  deleteConversation,
-  sendChatMessage,
-} from "./services/api";
+import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import "./App.css";
 
-function AppContent() {
-  const { user } = useAuth();
-  const [conversations, setConversations] = useState([]);
-  const [activeId, setActiveId] = useState(null);
+const API_BASE = "/api";
+
+const QUICK_PROMPTS = [
+  {
+    icon: "📚",
+    title: "AIML Syllabus",
+    subtitle: "Explore subjects and curriculum",
+    message: "What is the AIML syllabus?",
+  },
+  {
+    icon: "📅",
+    title: "Academic Calendar",
+    subtitle: "Important dates and events",
+    message: "What is the academic calendar?",
+  },
+  {
+    icon: "₹",
+    title: "College Fees",
+    subtitle: "Fee structure and payments",
+    message: "What is the college fee structure?",
+  },
+  {
+    icon: "💼",
+    title: "Placements",
+    subtitle: "Placement information",
+    message: "Tell me about college placements.",
+  },
+];
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [nameInput, setNameInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
+
+  const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [selectedSource, setSelectedSource] = useState(null);
-  const [isKBModalOpen, setIsKBModalOpen] = useState(false);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  // Load user's conversations when user logs in or changes
-  const fetchConversations = async (userId) => {
-    try {
-      const list = await getConversations(userId);
-      setConversations(list);
-      return list;
-    } catch (err) {
-      console.error("Error fetching conversations:", err);
-      return [];
-    }
-  };
+  const [conversationId, setConversationId] = useState(null);
+  const [conversations, setConversations] = useState([]);
+
+  const [loading, setLoading] = useState(false);
+  const [backendOnline, setBackendOnline] = useState(true);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
+
+  const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  /* -------------------------------------------------------
+     LOAD SAVED USER
+  ------------------------------------------------------- */
 
   useEffect(() => {
-    if (user?.user_id) {
-      fetchConversations(user.user_id);
-    } else {
-      setConversations([]);
-      setActiveId(null);
-      setMessages([]);
+    const savedUser = localStorage.getItem("college_ai_user");
+
+    if (savedUser) {
+      try {
+        setUser(JSON.parse(savedUser));
+      } catch {
+        localStorage.removeItem("college_ai_user");
+      }
     }
+  }, []);
+
+  /* -------------------------------------------------------
+     LOAD CONVERSATIONS
+  ------------------------------------------------------- */
+
+  useEffect(() => {
+    if (!user?.user_id) return;
+
+    loadConversations();
   }, [user]);
 
-  // Load messages when activeId changes
-  const selectConversation = async (convId) => {
-    setActiveId(convId);
-    if (!convId) {
-      setMessages([]);
-      return;
-    }
-    try {
-      const details = await getConversationDetails(convId);
-      setMessages(details.messages || []);
-    } catch (err) {
-      console.error("Error loading conversation:", err);
-    }
-  };
+  /* -------------------------------------------------------
+     AUTO SCROLL
+  ------------------------------------------------------- */
 
-  const handleNewChat = () => {
-    setActiveId(null);
-    setMessages([]);
-    setIsMobileMenuOpen(false);
-  };
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [messages, loading]);
 
-  const handleDeleteConversation = async (convId) => {
-    try {
-      await deleteConversation(convId);
-      setConversations((prev) => prev.filter((c) => c.conversation_id !== convId));
-      if (activeId === convId) {
-        handleNewChat();
-      }
-    } catch (err) {
-      alert("Failed to delete conversation: " + err.message);
-    }
-  };
+  /* -------------------------------------------------------
+     LOGIN
+  ------------------------------------------------------- */
 
-  const handleSendMessage = async (text) => {
-    if (!user) return;
-    setLoading(true);
+  async function handleLogin(event) {
+    event.preventDefault();
 
-    // Optimistically add user message to the UI
-    const optimisticUserMsg = {
-      message_id: "temp-" + Date.now(),
-      role: "user",
-      content: text,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimisticUserMsg]);
+    if (!nameInput.trim() || !emailInput.trim()) return;
 
     try {
-      const response = await sendChatMessage(user.user_id, activeId, text);
-      
-      // Update active ID if this was a new conversation
-      if (!activeId && response.conversation_id) {
-        setActiveId(response.conversation_id);
-      }
-
-      // Replace optimistic message and append assistant message
-      setMessages((prev) => {
-        const filtered = prev.filter((m) => m.message_id !== optimisticUserMsg.message_id);
-        return [
-          ...filtered,
-          response.user_message,
-          response.assistant_message,
-        ];
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          name: nameInput.trim(),
+          email: emailInput.trim(),
+        }),
       });
 
-      // Refresh conversations list in sidebar
-      fetchConversations(user.user_id);
-    } catch (err) {
-      const errorAssistantMsg = {
-        message_id: "err-" + Date.now(),
-        role: "assistant",
-        content: `❌ **Error:** ${err.message || "Failed to process question."}\n\nPlease verify that the backend is running and that your \`GEMINI_API_KEY\` is configured.`,
-        created_at: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, errorAssistantMsg]);
+      if (!response.ok) {
+        throw new Error("Login failed");
+      }
+
+      const data = await response.json();
+
+      setUser(data);
+      localStorage.setItem("college_ai_user", JSON.stringify(data));
+
+      setNameInput("");
+      setEmailInput("");
+      setBackendOnline(true);
+    } catch (error) {
+      console.error(error);
+      setBackendOnline(false);
+      alert(
+        "Could not connect to the College AI backend.\n\nPlease make sure FastAPI is running on port 8000."
+      );
+    }
+  }
+
+  /* -------------------------------------------------------
+     LOGOUT
+  ------------------------------------------------------- */
+
+  function handleLogout() {
+    localStorage.removeItem("college_ai_user");
+
+    setUser(null);
+    setMessages([]);
+    setConversationId(null);
+    setConversations([]);
+  }
+
+  /* -------------------------------------------------------
+     LOAD USER CONVERSATIONS
+  ------------------------------------------------------- */
+
+  async function loadConversations() {
+    try {
+      const response = await fetch(
+        `${API_BASE}/conversations?user_id=${encodeURIComponent(user.user_id)}`,
+        {
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        return;
+      }
+
+      const data = await response.json();
+
+      if (Array.isArray(data)) {
+        setConversations(data);
+      } else if (Array.isArray(data?.conversations)) {
+        setConversations(data.conversations);
+      }
+    } catch (error) {
+      console.log("Conversation loading skipped:", error);
+    }
+  }
+
+  /* -------------------------------------------------------
+     LOAD EXISTING CONVERSATION
+  ------------------------------------------------------- */
+
+  async function openConversation(id) {
+    if (!id) return;
+
+    try {
+      setLoading(true);
+
+      const response = await fetch(
+        `${API_BASE}/conversations/${encodeURIComponent(id)}`,
+        {
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Could not load conversation");
+      }
+
+      const data = await response.json();
+
+      setConversationId(id);
+
+      const loadedMessages =
+        data?.messages ||
+        data?.conversation?.messages ||
+        [];
+
+      if (Array.isArray(loadedMessages)) {
+        setMessages(loadedMessages);
+      }
+
+      setMobileSidebar(false);
+    } catch (error) {
+      console.error(error);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const activeConv = conversations.find((c) => c.conversation_id === activeId);
+  /* -------------------------------------------------------
+     NEW CONVERSATION
+  ------------------------------------------------------- */
+
+  function startNewConversation() {
+    setConversationId(null);
+    setMessages([]);
+    setMessage("");
+    setMobileSidebar(false);
+
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 100);
+  }
+
+  /* -------------------------------------------------------
+     SEND CHAT MESSAGE
+  ------------------------------------------------------- */
+
+  async function sendMessage(textOverride = null) {
+    const text = (textOverride ?? message).trim();
+
+    if (!text || loading || !user?.user_id) return;
+
+    const userMessage = {
+      message_id: `local-${Date.now()}`,
+      role: "user",
+      content: text,
+      sources: [],
+    };
+
+    setMessages((previous) => [...previous, userMessage]);
+    setMessage("");
+    setLoading(true);
+    setBackendOnline(true);
+
+    try {
+      const payload = {
+        user_id: user.user_id,
+        message: text,
+      };
+
+      if (conversationId) {
+        payload.conversation_id = conversationId;
+      }
+
+      const response = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.detail || "Chat request failed");
+      }
+
+      if (data.conversation_id) {
+        setConversationId(data.conversation_id);
+      }
+
+      if (data.assistant_message) {
+        setMessages((previous) => [
+          ...previous,
+          data.assistant_message,
+        ]);
+      }
+
+      if (data.conversation_id) {
+        loadConversations();
+      }
+    } catch (error) {
+      console.error("Chat error:", error);
+
+      setBackendOnline(false);
+
+      setMessages((previous) => [
+        ...previous,
+        {
+          message_id: `error-${Date.now()}`,
+          role: "assistant",
+          content:
+            "I couldn't connect to the College AI backend. Please make sure the FastAPI server is running on port 8000.",
+          sources: [],
+          error: true,
+        },
+      ]);
+    } finally {
+      setLoading(false);
+
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+    }
+  }
+
+  /* -------------------------------------------------------
+     ENTER KEY
+  ------------------------------------------------------- */
+
+  function handleKeyDown(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendMessage();
+    }
+  }
+
+  /* -------------------------------------------------------
+     FORMAT TIME
+  ------------------------------------------------------- */
+
+  function formatTime(dateValue) {
+    if (!dateValue) return "";
+
+    const date = new Date(dateValue);
+
+    if (Number.isNaN(date.getTime())) return "";
+
+    return date.toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+
+  /* -------------------------------------------------------
+     CONVERSATION TITLE
+  ------------------------------------------------------- */
+
+  function getConversationTitle(conversation) {
+    return (
+      conversation?.title ||
+      conversation?.name ||
+      conversation?.last_message ||
+      "New conversation"
+    );
+  }
+
+  /* -------------------------------------------------------
+     SOURCE CARD
+  ------------------------------------------------------- */
+
+  function SourceCard({ source }) {
+    const filename =
+      source?.document_filename ||
+      source?.filename ||
+      "College document";
+
+    const category = source?.category || "College Knowledge Base";
+
+    const page =
+      source?.page_number !== undefined
+        ? `Page ${source.page_number}`
+        : "";
+
+    return (
+      <div className="source-card">
+        <div className="source-icon">📄</div>
+
+        <div className="source-info">
+          <div className="source-name">{filename}</div>
+
+          <div className="source-meta">
+            {category}
+            {page ? ` • ${page}` : ""}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------
+     MESSAGE SOURCES
+  ------------------------------------------------------- */
+
+  function Sources({ sources }) {
+    if (!Array.isArray(sources) || sources.length === 0) {
+      return null;
+    }
+
+    const uniqueSources = sources.filter(
+      (source, index, array) => {
+        const key = `${source?.document_filename}-${source?.page_number}`;
+
+        return (
+          index ===
+          array.findIndex(
+            (item) =>
+              `${item?.document_filename}-${item?.page_number}` ===
+              key
+          )
+        );
+      }
+    );
+
+    return (
+      <div className="sources-section">
+        <div className="sources-heading">
+          <span>🔗</span>
+          <span>Sources</span>
+        </div>
+
+        <div className="sources-list">
+          {uniqueSources.map((source, index) => (
+            <SourceCard
+              key={`${source?.document_filename}-${source?.page_number}-${index}`}
+              source={source}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------
+     MARKDOWN RENDERER
+  ------------------------------------------------------- */
+
+  function MarkdownAnswer({ content }) {
+    return (
+      <div className="markdown-content">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            table({ children }) {
+              return (
+                <div className="table-wrapper">
+                  <table>{children}</table>
+                </div>
+              );
+            },
+
+            a({ children, ...props }) {
+              return (
+                <a
+                  {...props}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {children}
+                </a>
+              );
+            },
+
+            code({ inline, children, ...props }) {
+              if (inline) {
+                return <code {...props}>{children}</code>;
+              }
+
+              return (
+                <pre>
+                  <code {...props}>{children}</code>
+                </pre>
+              );
+            },
+          }}
+        >
+          {content || ""}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------
+     WELCOME SCREEN
+  ------------------------------------------------------- */
+
+  function WelcomeScreen() {
+    return (
+      <div className="welcome-screen">
+        <div className="welcome-icon">✦</div>
+
+        <h1>Hello, Tanvi!</h1>
+
+        <p>
+          What would you like to know about your college?
+        </p>
+
+        <div className="quick-grid">
+          {QUICK_PROMPTS.map((item) => (
+            <button
+              className="quick-card"
+              key={item.title}
+              onClick={() => sendMessage(item.message)}
+            >
+              <div className="quick-icon">{item.icon}</div>
+
+              <div className="quick-text">
+                <strong>{item.title}</strong>
+                <span>{item.subtitle}</span>
+              </div>
+
+              <span className="quick-arrow">→</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------
+     LOGIN SCREEN
+  ------------------------------------------------------- */
+
+  if (!user) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <div className="login-logo">🎓</div>
+
+          <div className="login-brand">
+            <h1>College AI</h1>
+            <p>Knowledge Base</p>
+          </div>
+
+          <div className="login-content">
+            <h2>Welcome to College AI</h2>
+
+            <p>
+              Ask questions and get answers from your
+              college documents.
+            </p>
+
+            <form onSubmit={handleLogin}>
+              <label>
+                Your Name
+                <input
+                  type="text"
+                  placeholder="Enter your name"
+                  value={nameInput}
+                  onChange={(event) =>
+                    setNameInput(event.target.value)
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Email Address
+                <input
+                  type="email"
+                  placeholder="Enter your email"
+                  value={emailInput}
+                  onChange={(event) =>
+                    setEmailInput(event.target.value)
+                  }
+                  required
+                />
+              </label>
+
+              <button
+                type="submit"
+                className="login-button"
+              >
+                Continue to College AI
+                <span>→</span>
+              </button>
+            </form>
+          </div>
+
+          <div className="login-footer">
+            Answers are generated from your college documents.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------------------------------------------
+     MAIN APPLICATION
+  ------------------------------------------------------- */
 
   return (
-    <div className="app-container">
-      {/* Onboarding / Login Modal */}
-      <OnboardingModal isOpen={!user} />
+    <div className="app-shell">
+      {/* MOBILE OVERLAY */}
 
-      {/* Source Citation Modal */}
-      <SourceModal
-        source={selectedSource}
-        isOpen={!!selectedSource}
-        onClose={() => setSelectedSource(null)}
-      />
-
-      {/* Document Library / Knowledge Base Modal */}
-      <KnowledgeBaseModal
-        isOpen={isKBModalOpen}
-        onClose={() => setIsKBModalOpen(false)}
-      />
-
-      {/* Sidebar */}
-      <Sidebar
-        conversations={conversations}
-        activeId={activeId}
-        onSelectConversation={selectConversation}
-        onNewChat={handleNewChat}
-        onDeleteConversation={handleDeleteConversation}
-        onOpenKBModal={() => setIsKBModalOpen(true)}
-        isOpen={isMobileMenuOpen}
-        onCloseMobile={() => setIsMobileMenuOpen(false)}
-      />
-
-      {/* Main Chat Viewport */}
-      <div className="main-area">
-        <Header
-          currentTitle={activeConv ? activeConv.title : "New Conversation"}
-          onToggleMobileMenu={() => setIsMobileMenuOpen((prev) => !prev)}
-          onOpenKBModal={() => setIsKBModalOpen(true)}
+      {mobileSidebar && (
+        <div
+          className="mobile-overlay"
+          onClick={() => setMobileSidebar(false)}
         />
+      )}
 
-        <ChatArea
-          messages={messages}
-          loading={loading}
-          onSendMessage={handleSendMessage}
-          onSelectSource={(src) => setSelectedSource(src)}
-          userName={user?.name}
-        />
-      </div>
+      {/* SIDEBAR */}
+
+      <aside
+        className={`sidebar ${mobileSidebar ? "sidebar-open" : ""
+          }`}
+      >
+        <div className="sidebar-top">
+          <div className="brand">
+            <div className="brand-logo">🎓</div>
+
+            <div>
+              <h2>College AI</h2>
+              <span>Knowledge Base</span>
+            </div>
+          </div>
+
+          <button
+            className="new-chat-button"
+            onClick={startNewConversation}
+          >
+            <span>＋</span>
+            New Conversation
+          </button>
+
+          <div className="recent-heading">
+            Recent Conversations
+          </div>
+
+          <div className="conversation-list">
+            {conversations.length === 0 ? (
+              <div className="empty-conversations">
+                <div>💬</div>
+                <span>No previous conversations</span>
+              </div>
+            ) : (
+              conversations.map((conversation, index) => {
+                const id =
+                  conversation.conversation_id ||
+                  conversation.id;
+
+                return (
+                  <button
+                    key={id || index}
+                    className={`conversation-item ${conversationId === id
+                        ? "active"
+                        : ""
+                      }`}
+                    onClick={() =>
+                      openConversation(id)
+                    }
+                  >
+                    <span className="conversation-icon">
+                      💬
+                    </span>
+
+                    <span className="conversation-title">
+                      {getConversationTitle(
+                        conversation
+                      )}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        <div className="sidebar-bottom">
+          <div className="profile">
+            <div className="avatar">
+              {(user.name || "T")
+                .charAt(0)
+                .toUpperCase()}
+            </div>
+
+            <div className="profile-info">
+              <strong>{user.name}</strong>
+              <span>{user.email}</span>
+            </div>
+          </div>
+
+          <button
+            className="logout-button"
+            onClick={handleLogout}
+          >
+            <span>↪</span>
+            Logout
+          </button>
+        </div>
+      </aside>
+
+      {/* MAIN AREA */}
+
+      <main className="main-area">
+        {/* HEADER */}
+
+        <header className="topbar">
+          <div className="header-left">
+            <button
+              className="mobile-menu"
+              onClick={() =>
+                setMobileSidebar(true)
+              }
+              aria-label="Open menu"
+            >
+              ☰
+            </button>
+
+            <div>
+              <h1>College AI Assistant</h1>
+
+              <p>
+                Ask anything about your college
+                documents
+              </p>
+            </div>
+          </div>
+
+          <div
+            className={`status ${backendOnline ? "online" : "offline"
+              }`}
+          >
+            <span className="status-dot" />
+
+            {backendOnline
+              ? "AI Online"
+              : "Backend Offline"}
+          </div>
+        </header>
+
+        {/* CHAT AREA */}
+
+        <section className="chat-area">
+          {messages.length === 0 ? (
+            <WelcomeScreen />
+          ) : (
+            <div className="messages-container">
+              {messages.map((item, index) => {
+                const isUser =
+                  item.role === "user";
+
+                return (
+                  <div
+                    key={
+                      item.message_id ||
+                      `${item.role}-${index}`
+                    }
+                    className={`message-row ${isUser
+                        ? "user-row"
+                        : "assistant-row"
+                      }`}
+                  >
+                    {!isUser && (
+                      <div className="assistant-avatar">
+                        ✦
+                      </div>
+                    )}
+
+                    <div
+                      className={`message-content ${isUser
+                          ? "user-message"
+                          : "assistant-message"
+                        } ${item.error ? "error-message" : ""
+                        }`}
+                    >
+                      {isUser ? (
+                        <p>{item.content}</p>
+                      ) : (
+                        <MarkdownAnswer
+                          content={item.content}
+                        />
+                      )}
+
+                      {!isUser && (
+                        <Sources
+                          sources={item.sources}
+                        />
+                      )}
+
+                      <span className="message-time">
+                        {formatTime(item.created_at)}
+                      </span>
+                    </div>
+
+                    {isUser && (
+                      <div className="user-avatar">
+                        {(user.name || "T")
+                          .charAt(0)
+                          .toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {loading && (
+                <div className="message-row assistant-row">
+                  <div className="assistant-avatar">
+                    ✦
+                  </div>
+
+                  <div className="typing-bubble">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </section>
+
+        {/* INPUT AREA */}
+
+        <footer className="composer-area">
+          <div className="composer">
+            <div className="composer-icon">✦</div>
+
+            <textarea
+              ref={inputRef}
+              value={message}
+              onChange={(event) =>
+                setMessage(event.target.value)
+              }
+              onKeyDown={handleKeyDown}
+              placeholder="Ask about syllabus, fees, placements, academics..."
+              rows={1}
+              disabled={loading}
+            />
+
+            <button
+              className="send-button"
+              onClick={() => sendMessage()}
+              disabled={!message.trim() || loading}
+              aria-label="Send message"
+            >
+              {loading ? "…" : "➤"}
+            </button>
+          </div>
+
+          <p className="footer-note">
+            College AI answers using information from your
+            uploaded college documents.
+          </p>
+        </footer>
+      </main>
     </div>
   );
 }
 
-export default function App() {
-  return (
-    <AuthProvider>
-      <AppContent />
-    </AuthProvider>
-  );
-}
+export default App;

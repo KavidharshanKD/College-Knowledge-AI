@@ -1,154 +1,385 @@
 import uuid
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
+
 from sqlalchemy.orm import Session
 
 from app.config import settings
+
 from app.models.user import User
 from app.models.conversation import Conversation
 from app.models.message import Message
+
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
     MessageResponse,
     SourceReference
 )
+
 from app.services.embedding_service import embedding_service
 from app.services.vector_store import vector_store
 from app.services.llm_service import llm_service
 
+
 class RAGService:
-    def process_query(self, request: ChatRequest, db: Session) -> ChatResponse:
-        """Executes the full RAG pipeline and persists the turn to the database."""
-        
-        # 1. Verify User exists
-        user = db.query(User).filter(User.user_id == request.user_id).first()
-        if not user:
-            raise ValueError(f"User with id {request.user_id} not found.")
 
-        # 2. Find or Create Conversation
-        conversation = None
-        if request.conversation_id:
-            conversation = db.query(Conversation).filter(
-                Conversation.conversation_id == request.conversation_id,
-                Conversation.user_id == user.user_id
-            ).first()
+    # ============================================================
+    # MAIN CHAT FUNCTION
+    # ============================================================
 
-        if not conversation:
-            # Create new conversation with title generated from query
-            clean_title = request.message.strip()
-            if len(clean_title) > 45:
-                clean_title = clean_title[:42] + "..."
-            
-            conversation = Conversation(
-                conversation_id=str(uuid.uuid4()),
-                user_id=user.user_id,
-                title=clean_title
+    def process_query(
+        self,
+        request: ChatRequest,
+        db: Session
+    ) -> ChatResponse:
+
+        # --------------------------------------------------------
+        # 1. VALIDATE USER
+        # --------------------------------------------------------
+
+        user = (
+            db.query(User)
+            .filter(
+                User.user_id == request.user_id
             )
+            .first()
+        )
+
+        if not user:
+
+            raise ValueError(
+                f"User with id "
+                f"{request.user_id} not found."
+            )
+
+        # --------------------------------------------------------
+        # 2. VALIDATE MESSAGE
+        # --------------------------------------------------------
+
+        user_question = (
+            request.message or ""
+        ).strip()
+
+        if not user_question:
+
+            raise ValueError(
+                "Message cannot be empty."
+            )
+
+        # --------------------------------------------------------
+        # 3. FIND OR CREATE CONVERSATION
+        # --------------------------------------------------------
+
+        conversation = None
+
+        if request.conversation_id:
+
+            conversation = (
+                db.query(Conversation)
+                .filter(
+                    Conversation.conversation_id
+                    == request.conversation_id,
+
+                    Conversation.user_id
+                    == user.user_id
+                )
+                .first()
+            )
+
+        if conversation is None:
+
+            title = user_question
+
+            if len(title) > 45:
+                title = title[:42] + "..."
+
+            conversation = Conversation(
+                conversation_id=str(
+                    uuid.uuid4()
+                ),
+                user_id=user.user_id,
+                title=title
+            )
+
             db.add(conversation)
             db.commit()
             db.refresh(conversation)
 
-        # 3. Save User Message to Database
-        user_msg = Message(
+        # --------------------------------------------------------
+        # 4. SAVE USER MESSAGE
+        # --------------------------------------------------------
+
+        user_message = Message(
             message_id=str(uuid.uuid4()),
-            conversation_id=conversation.conversation_id,
+            conversation_id=(
+                conversation.conversation_id
+            ),
             role="user",
-            content=request.message.strip()
+            content=user_question
         )
-        db.add(user_msg)
+
+        db.add(user_message)
         db.commit()
-        db.refresh(user_msg)
+        db.refresh(user_message)
 
-        # 4. Fetch Previous Messages for Multi-turn Context (last 6 messages)
-        prev_messages = db.query(Message).filter(
-            Message.conversation_id == conversation.conversation_id
-        ).order_by(Message.created_at.asc()).all()
+        # --------------------------------------------------------
+        # 5. CONVERSATION HISTORY
+        # --------------------------------------------------------
 
-        history = [
-            {"role": m.role, "content": m.content}
-            for m in prev_messages[:-1] # exclude the just-added user message
-        ]
+        previous_messages = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id
+                == conversation.conversation_id
+            )
+            .order_by(
+                Message.created_at.asc()
+            )
+            .all()
+        )
 
-        # 5. Retrieve Relevant Chunks from ChromaDB
-        retrieved_chunks: List[Dict[str, Any]] = []
-        source_refs: List[SourceReference] = []
+        history = []
 
-        if embedding_service.is_ready() and vector_store.count() > 0:
-            try:
-                query_embedding = embedding_service.get_query_embedding(request.message)
-                retrieved_chunks = vector_store.similarity_search(
-                    query_embedding=query_embedding,
-                    top_k=settings.TOP_K_RESULTS,
-                    query_text=request.message
+        for message in previous_messages[:-1]:
+
+            history.append(
+                {
+                    "role": message.role,
+                    "content": message.content
+                }
+            )
+
+        # Keep history reasonably small
+        history = history[-6:]
+
+        # --------------------------------------------------------
+        # 6. RETRIEVE DOCUMENTS
+        # --------------------------------------------------------
+
+        retrieved_chunks: List[
+            Dict[str, Any]
+        ] = []
+
+        source_refs: List[
+            SourceReference
+        ] = []
+
+        try:
+
+            if (
+                embedding_service.is_ready()
+                and vector_store.count() > 0
+            ):
+
+                query_embedding = (
+                    embedding_service
+                    .get_query_embedding(
+                        user_question
+                    )
                 )
 
-                # Format source references for frontend and database persistence
-                for c in retrieved_chunks:
-                    ref = SourceReference(
-                        document_filename=c.get("document_filename", "Unknown"),
-                        category=c.get("category", "General"),
-                        page_number=c.get("page_number", 1),
-                        chunk_index=c.get("chunk_index", 0),
-                        snippet=c.get("text", "")[:350] + ("..." if len(c.get("text", "")) > 350 else ""),
-                        score=c.get("similarity_score")
+                retrieved_chunks = (
+                    vector_store.similarity_search(
+                        query_embedding=query_embedding,
+                        top_k=settings.TOP_K_RESULTS,
+                        query_text=user_question
                     )
-                    source_refs.append(ref)
+                )
 
-            except Exception as e:
-                # Log error and continue to LLM with empty context
-                print(f"Error during vector retrieval: {e}")
+                # ------------------------------------------------
+                # SOURCE REFERENCES
+                # ------------------------------------------------
 
-        # 6. Generate Grounded Answer via Gemini LLM
-        if not embedding_service.is_ready() or not llm_service.is_ready():
-            assistant_text = (
-                "⚠️ **Gemini API Key Required**\n\n"
-                "The College AI Knowledge Base requires a Google Gemini API Key to embed documents and generate answers.\n\n"
-                "Please add your `GEMINI_API_KEY` to the `backend/.env` file and restart or re-ingest the knowledge base."
+                for chunk in retrieved_chunks:
+
+                    text = str(
+                        chunk.get("text", "")
+                    )
+
+                    snippet = text[:350]
+
+                    if len(text) > 350:
+                        snippet += "..."
+
+                    source_refs.append(
+                        SourceReference(
+                            document_filename=chunk.get(
+                                "document_filename",
+                                "Unknown Document"
+                            ),
+
+                            category=chunk.get(
+                                "category",
+                                "General"
+                            ),
+
+                            page_number=int(
+                                chunk.get(
+                                    "page_number",
+                                    1
+                                )
+                            ),
+
+                            chunk_index=int(
+                                chunk.get(
+                                    "chunk_index",
+                                    0
+                                )
+                            ),
+
+                            snippet=snippet,
+
+                            score=chunk.get(
+                                "similarity_score"
+                            )
+                        )
+                    )
+
+        except Exception as error:
+
+            # Retrieval failure should not crash
+            # the entire chat endpoint.
+
+            print(
+                f"RAG retrieval error: {error}"
             )
+
+            retrieved_chunks = []
+            source_refs = []
+
+        # --------------------------------------------------------
+        # 7. GENERATE ANSWER
+        # --------------------------------------------------------
+
+        if not embedding_service.is_ready():
+
+            assistant_text = (
+                "⚠️ **Knowledge Base Error**\n\n"
+                "The local embedding model is not available. "
+                "Please check the ChromaDB embedding dependencies."
+            )
+
         elif vector_store.count() == 0:
+
             assistant_text = (
                 "📚 **No Documents Ingested Yet**\n\n"
-                "The knowledge base is currently empty. Please run the document ingestion script (`python backend/ingest.py`) "
-                "or click **Re-index Knowledge Base** in the dashboard to process the college documents."
+                "The knowledge base is currently empty.\n\n"
+                "Please run the document ingestion process "
+                "before asking questions."
             )
+
+        elif not llm_service.is_ready():
+
+            assistant_text = (
+                "⚠️ **AI Answer Service Unavailable**\n\n"
+                "The document database is working, but the "
+                "Gemini language model is not configured.\n\n"
+                "Please check your GEMINI_API_KEY in "
+                "`backend/.env`."
+            )
+
         else:
-            assistant_text = llm_service.generate_answer(
-                query=request.message,
-                context_chunks=retrieved_chunks,
-                conversation_history=history
+
+            try:
+
+                assistant_text = (
+                    llm_service.generate_answer(
+                        query=user_question,
+                        context_chunks=retrieved_chunks,
+                        conversation_history=history
+                    )
+                )
+
+            except Exception as error:
+
+                print(
+                    f"LLM generation error: {error}"
+                )
+
+                assistant_text = (
+                    "⚠️ **Unable to generate an answer right now.**\n\n"
+                    "The document retrieval system is working, "
+                    "but the AI answer service returned an error.\n\n"
+                    f"Error: {str(error)}"
+                )
+
+        # --------------------------------------------------------
+        # 8. SAVE ASSISTANT MESSAGE
+        # --------------------------------------------------------
+
+        sources_payload = [
+            ref.model_dump()
+            for ref in source_refs
+        ]
+
+        assistant_message = Message(
+            message_id=str(uuid.uuid4()),
+            conversation_id=(
+                conversation.conversation_id
+            ),
+            role="assistant",
+            content=assistant_text
+        )
+
+        # Save sources only if the model supports it
+        try:
+
+            assistant_message.sources = (
+                sources_payload
             )
 
-        # 7. Save Assistant Message to Database
-        sources_payload = [ref.model_dump() for ref in source_refs]
-        assistant_msg = Message(
-            message_id=str(uuid.uuid4()),
-            conversation_id=conversation.conversation_id,
-            role="assistant",
-            content=assistant_text,
-            sources_json=None
-        )
-        assistant_msg.sources = sources_payload
-        db.add(assistant_msg)
+        except Exception:
 
-        # Update Conversation timestamp
+            pass
+
+        db.add(assistant_message)
+
+        # --------------------------------------------------------
+        # 9. UPDATE CONVERSATION
+        # --------------------------------------------------------
+
         conversation.updated_at = datetime.utcnow()
-        db.commit()
-        db.refresh(assistant_msg)
 
-        # 8. Return ChatResponse
+        db.commit()
+        db.refresh(assistant_message)
+
+        # --------------------------------------------------------
+        # 10. RETURN RESPONSE
+        # --------------------------------------------------------
+
         return ChatResponse(
-            conversation_id=conversation.conversation_id,
-            user_message=MessageResponse.model_validate(user_msg),
-            assistant_message=MessageResponse(
-                message_id=assistant_msg.message_id,
-                conversation_id=assistant_msg.conversation_id,
-                role=assistant_msg.role,
-                content=assistant_msg.content,
-                sources=sources_payload,
-                created_at=assistant_msg.created_at
+
+            conversation_id=(
+                conversation.conversation_id
             ),
+
+            user_message=MessageResponse.model_validate(
+                user_message
+            ),
+
+            assistant_message=MessageResponse(
+                message_id=(
+                    assistant_message.message_id
+                ),
+
+                conversation_id=(
+                    assistant_message.conversation_id
+                ),
+
+                role=assistant_message.role,
+
+                content=assistant_message.content,
+
+                sources=sources_payload,
+
+                created_at=(
+                    assistant_message.created_at
+                )
+            ),
+
             sources=source_refs
         )
+
 
 rag_service = RAGService()

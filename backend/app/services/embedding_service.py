@@ -1,358 +1,231 @@
-import os
-import time
-import logging
 from typing import List
-
-from app.config import settings
+import logging
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingService:
-    def __init__(self):
-        # Read embedding model from settings
-        raw_name = settings.EMBEDDING_MODEL
-        # "local" means use local ONNX embeddings, skip Gemini
-        # "models/xxx" or "xxx" means use Gemini
-        self.model_name = raw_name.replace("models/", "")
-        self.use_local_only = (raw_name.lower() == "local")
+    """
+    Local embedding service.
 
-        self._gemini_ready = False
-        self._gemini_client = None
+    Uses Chroma's DefaultEmbeddingFunction,
+    which provides local ONNX embeddings.
+
+    This avoids Gemini embedding quota problems.
+    """
+
+    def __init__(self):
+
         self._local_embedder = None
 
-        self._check_configuration()
+        self._load_local_embedder()
 
-    def _check_configuration(self):
-        """Check whether Gemini API is configured."""
+    # ============================================================
+    # LOAD LOCAL MODEL
+    # ============================================================
 
-        # If explicitly set to "local", skip Gemini entirely
-        if self.use_local_only:
-            self._gemini_ready = False
-            return
+    def _load_local_embedder(self):
 
-        api_key = settings.GEMINI_API_KEY or os.environ.get(
-            "GEMINI_API_KEY", ""
-        )
+        if self._local_embedder is not None:
+            return self._local_embedder
 
-        if (
-            api_key
-            and api_key.strip()
-            and api_key.strip() != "your_google_gemini_api_key_here"
-        ):
-            try:
-                from google import genai
+        try:
 
-                self._gemini_client = genai.Client(
-                    api_key=api_key.strip()
-                )
+            from chromadb.utils import embedding_functions
 
-                self._gemini_ready = True
+            self._local_embedder = (
+                embedding_functions.DefaultEmbeddingFunction()
+            )
 
-            except Exception as e:
-                logger.warning(
-                    f"Google GenAI client could not be configured: {e}"
-                )
+            logger.info(
+                "Local embedding model loaded successfully."
+            )
 
-                self._gemini_client = None
-                self._gemini_ready = False
+        except Exception as error:
 
-        else:
-            self._gemini_ready = False
+            logger.error(
+                f"Could not load local embedding model: {error}"
+            )
 
-    def _get_local_embedder(self):
-        """
-        Load Chroma's built-in local embedding model.
+            self._local_embedder = None
 
-        This uses all-MiniLM-L6-v2 and produces
-        384-dimensional embeddings.
-        """
-
-        if self._local_embedder is None:
-            try:
-                from chromadb.utils import embedding_functions
-
-                self._local_embedder = (
-                    embedding_functions.DefaultEmbeddingFunction()
-                )
-
-                logger.info(
-                    "Local ONNX embedding model loaded successfully."
-                )
-
-            except Exception as e:
-                logger.error(
-                    f"Failed to load local ONNX embedder: {e}"
-                )
-
-                self._local_embedder = None
-
-        return self._local_embedder
-
-    def is_gemini_ready(self) -> bool:
-        """Return True if Gemini API is configured."""
-
-        self._check_configuration()
-        return self._gemini_ready
+    # ============================================================
+    # STATUS
+    # ============================================================
 
     def is_ready(self) -> bool:
-        """
-        Return True if either Gemini or the local
-        embedding model is available.
-        """
 
-        if self.is_gemini_ready():
-            return True
+        return self._local_embedder is not None
 
-        return self._get_local_embedder() is not None
+    def is_gemini_ready(self) -> bool:
+
+        # Embeddings intentionally do not use Gemini.
+        return False
 
     def get_embedding_provider_name(self) -> str:
-        """Return the currently available embedding provider."""
 
-        if self.use_local_only:
-            return "Local ONNX Embeddings (all-MiniLM-L6-v2, 384-dim)"
+        if self.is_ready():
 
-        if self.is_gemini_ready():
-            return f"Google Gemini ({self.model_name})"
+            return (
+                "Local ONNX Embeddings "
+                "(all-MiniLM-L6-v2)"
+            )
 
-        return "Local ONNX Embeddings (all-MiniLM-L6-v2, 384-dim)"
+        return "Unavailable"
 
-    def _convert_to_python_floats(self, embedding) -> List[float]:
-        """
-        Convert NumPy float32 / other numeric values
-        into normal Python floats.
+    # ============================================================
+    # CONVERT VALUES
+    # ============================================================
 
-        This is important because ChromaDB expects
-        standard Python numeric values.
-        """
+    @staticmethod
+    def _convert_to_python_floats(
+        embedding
+    ) -> List[float]:
 
-        return [float(value) for value in embedding]
+        return [
+            float(value)
+            for value in embedding
+        ]
 
-    def get_embedding(self, text: str) -> List[float]:
-        """
-        Generate an embedding for a single piece of text.
+    # ============================================================
+    # SINGLE EMBEDDING
+    # ============================================================
 
-        Gemini is attempted first.
-        If Gemini is unavailable, the local ONNX
-        embedding model is used automatically.
-        """
+    def get_embedding(
+        self,
+        text: str
+    ) -> List[float]:
 
-        # --------------------------------------------------
-        # 1. Try Gemini
-        # --------------------------------------------------
+        if not text or not text.strip():
 
-        if self.is_gemini_ready():
+            raise ValueError(
+                "Cannot create an embedding for empty text."
+            )
 
-            try:
-                if self._gemini_client:
+        if not self.is_ready():
 
-                    response = self._gemini_client.models.embed_content(
-                        model=self.model_name,
-                        contents=text
-                    )
+            self._load_local_embedder()
 
-                    if (
-                        hasattr(response, "embeddings")
-                        and response.embeddings
-                    ):
-                        embedding = response.embeddings[0].values
+        if self._local_embedder is None:
 
-                        return self._convert_to_python_floats(
-                            embedding
-                        )
+            raise RuntimeError(
+                "Local embedding model is not available."
+            )
 
-                    if (
-                        hasattr(response, "embedding")
-                        and response.embedding
-                    ):
-                        embedding = response.embedding.values
+        try:
 
-                        return self._convert_to_python_floats(
-                            embedding
-                        )
+            embeddings = self._local_embedder(
+                [text]
+            )
 
-            except Exception as e:
+            if not embeddings:
 
-                logger.warning(
-                    f"Gemini embedding unavailable: {e}. "
-                    "Using local embedding model instead."
+                raise RuntimeError(
+                    "Embedding model returned no result."
                 )
 
-        # --------------------------------------------------
-        # 2. Local ONNX fallback
-        # --------------------------------------------------
+            return self._convert_to_python_floats(
+                embeddings[0]
+            )
 
-        local_fn = self._get_local_embedder()
+        except Exception as error:
 
-        if local_fn:
+            logger.error(
+                f"Embedding generation failed: {error}"
+            )
 
-            try:
-                embeddings = local_fn([text])
+            raise RuntimeError(
+                f"Failed to generate embedding: {error}"
+            ) from error
 
-                if embeddings and len(embeddings) > 0:
+    # ============================================================
+    # QUERY EMBEDDING
+    # ============================================================
 
-                    # Convert np.float32 -> Python float
-                    return self._convert_to_python_floats(
-                        embeddings[0]
-                    )
-
-            except Exception as e:
-
-                logger.error(
-                    f"Local embedding generation failed: {e}"
-                )
-
-        raise RuntimeError(
-            "No embedding provider available."
-        )
-
-    def get_query_embedding(self, query: str) -> List[float]:
-        """
-        Generate an embedding specifically for a user query.
-
-        The same embedding model used for the documents
-        should be used for the query.
-        """
+    def get_query_embedding(
+        self,
+        query: str
+    ) -> List[float]:
 
         return self.get_embedding(query)
+
+    # ============================================================
+    # BATCH EMBEDDINGS
+    # ============================================================
 
     def get_embeddings_batch(
         self,
         texts: List[str],
-        batch_size: int = 50
+        batch_size: int = 100
     ) -> List[List[float]]:
-        """
-        Generate embeddings for multiple text chunks.
-
-        Gemini is attempted first.
-        If Gemini fails, local ONNX embeddings are used.
-        """
 
         if not texts:
             return []
 
-        # --------------------------------------------------
-        # 1. Try Gemini
-        # --------------------------------------------------
+        if not self.is_ready():
+            self._load_local_embedder()
 
-        if self.is_gemini_ready():
+        if self._local_embedder is None:
 
-            all_embeddings = []
-
-            for i in range(0, len(texts), batch_size):
-
-                batch = texts[i:i + batch_size]
-
-                success = False
-                retries = 3
-
-                while not success and retries > 0:
-
-                    try:
-
-                        if self._gemini_client:
-
-                            response = (
-                                self._gemini_client.models.embed_content(
-                                    model=self.model_name,
-                                    contents=batch
-                                )
-                            )
-
-                            if (
-                                hasattr(response, "embeddings")
-                                and response.embeddings
-                            ):
-
-                                batch_embeddings = [
-                                    self._convert_to_python_floats(
-                                        embedding.values
-                                    )
-                                    for embedding in response.embeddings
-                                ]
-
-                                all_embeddings.extend(
-                                    batch_embeddings
-                                )
-
-                                success = True
-
-                                time.sleep(0.1)
-
-                                continue
-
-                    except Exception as e:
-
-                        retries -= 1
-
-                        logger.warning(
-                            f"Gemini batch embedding error: {e}"
-                        )
-
-                        if retries > 0:
-                            time.sleep(1.0)
-
-            # If Gemini successfully embedded everything
-            if len(all_embeddings) == len(texts):
-
-                return all_embeddings
-
-            logger.warning(
-                "Gemini could not embed the complete batch. "
-                "Switching to local embeddings."
+            raise RuntimeError(
+                "Local embedding model is not available."
             )
 
-        # --------------------------------------------------
-        # 2. Local ONNX fallback
-        # --------------------------------------------------
+        cleaned_texts = []
 
-        local_fn = self._get_local_embedder()
+        for text in texts:
 
-        if local_fn:
+            if text is None:
+                cleaned_texts.append("")
+            else:
+                cleaned_texts.append(
+                    str(text)
+                )
 
-            try:
+        all_embeddings = []
 
-                all_embeddings = []
+        try:
 
-                chunk_batch_size = 100
+            for start in range(
+                0,
+                len(cleaned_texts),
+                batch_size
+            ):
 
-                for i in range(
-                    0,
-                    len(texts),
-                    chunk_batch_size
-                ):
+                batch = cleaned_texts[
+                    start:start + batch_size
+                ]
 
-                    batch = texts[
-                        i:i + chunk_batch_size
-                    ]
+                embeddings = (
+                    self._local_embedder(batch)
+                )
 
-                    embeddings = local_fn(batch)
+                if len(embeddings) != len(batch):
 
-                    # Convert every np.float32 value
-                    # to normal Python float
-                    converted_embeddings = [
+                    raise RuntimeError(
+                        "Embedding count does not match "
+                        "the input text count."
+                    )
+
+                for embedding in embeddings:
+
+                    all_embeddings.append(
                         self._convert_to_python_floats(
                             embedding
                         )
-                        for embedding in embeddings
-                    ]
-
-                    all_embeddings.extend(
-                        converted_embeddings
                     )
 
-                return all_embeddings
+        except Exception as error:
 
-            except Exception as e:
+            logger.error(
+                f"Batch embedding generation failed: {error}"
+            )
 
-                logger.error(
-                    f"Local batch embedding failed: {e}"
-                )
+            raise RuntimeError(
+                f"Failed to generate batch embeddings: {error}"
+            ) from error
 
-        raise RuntimeError(
-            "No embedding provider available."
-        )
+        return all_embeddings
 
 
-# Create one shared embedding service instance
 embedding_service = EmbeddingService()

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -15,7 +16,7 @@ class Settings(BaseSettings):
 
     # Google Gemini
     GEMINI_API_KEY: str = ""
-    LLM_MODEL: str = "gemini-1.5-flash"
+    LLM_MODEL: str = "gemini-3.8-flash"
     # EMBEDDING_MODEL can be:
     # - "models/text-embedding-004" (Google Gemini - may not be available)
     # - "local" (use Chroma's local ONNX all-MiniLM-L6-v2, 384-dimensional)
@@ -44,6 +45,25 @@ class Settings(BaseSettings):
         "http://127.0.0.1:3000",
         "*"
     ]
+
+    @field_validator("CHROMA_PERSIST_DIR", mode="after")
+    @classmethod
+    def resolve_chroma_dir(cls, v: str) -> str:
+        p = Path(v)
+        if not p.is_absolute():
+            return str((BACKEND_DIR / p).resolve())
+        return str(p.resolve())
+
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def resolve_database_url(cls, v: str) -> str:
+        if v.startswith("sqlite:///") and not v.startswith("sqlite:////"):
+            rel_path = v.replace("sqlite:///", "")
+            p = Path(rel_path)
+            if not p.is_absolute():
+                abs_p = (BACKEND_DIR / p).resolve()
+                return f"sqlite:///{abs_p}"
+        return v
 
     model_config = SettingsConfigDict(
         env_file=str(BACKEND_DIR / ".env"),

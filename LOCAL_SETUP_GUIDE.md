@@ -84,8 +84,8 @@ DATABASE_URL=sqlite:///./college_ai.db
 CHROMA_PERSIST_DIR=./data/chroma_db
 CHROMA_COLLECTION_NAME=college_knowledge_base
 
-# LLM Model (Supported: gemini-1.5-flash, gemini-2.0-flash)
-LLM_MODEL=gemini-1.5-flash
+# LLM Model (Supported: gemini-3.8-flash)
+LLM_MODEL=gemini-3.8-flash
 
 # Embeddings: "local" (uses Chroma's built-in ONNX model, zero API quota cost)
 # Or "models/text-embedding-004" to use Gemini embeddings

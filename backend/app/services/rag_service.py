@@ -47,15 +47,19 @@ class RAGService:
         )
 
         if not user:
-            user = User(
-                user_id=request.user_id,
-                name="Student",
-                email="student@college.edu",
-                role="student"
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
+            existing_user = db.query(User).first()
+            if existing_user:
+                user = existing_user
+            else:
+                user = User(
+                    user_id=request.user_id,
+                    name="Student",
+                    email=f"student-{uuid.uuid4().hex[:6]}@college.edu",
+                    role="student"
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
 
         # --------------------------------------------------------
         # 2. VALIDATE MESSAGE

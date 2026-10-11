@@ -47,11 +47,15 @@ class RAGService:
         )
 
         if not user:
-
-            raise ValueError(
-                f"User with id "
-                f"{request.user_id} not found."
+            user = User(
+                user_id=request.user_id,
+                name="Student",
+                email="student@college.edu",
+                role="student"
             )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
 
         # --------------------------------------------------------
         # 2. VALIDATE MESSAGE

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # Google Gemini
     GEMINI_API_KEY: str = ""
-    LLM_MODEL: str = "gemini-3.6-flash"
+    LLM_MODEL: str = "gemini-1.5-flash"
     # EMBEDDING_MODEL can be:
     # - "models/text-embedding-004" (Google Gemini - may not be available)
     # - "local" (use Chroma's local ONNX all-MiniLM-L6-v2, 384-dimensional)

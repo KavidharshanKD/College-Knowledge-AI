@@ -33,7 +33,7 @@ def get_user_conversations(
     # Verify user exists
     user = db.query(User).filter(User.user_id == user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
+        return []
 
     # Query conversations with message counts
     conversations = (

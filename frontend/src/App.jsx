@@ -3,7 +3,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_URL;
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
+
+const DEFAULT_USER = {
+  user_id: "student-local-user",
+  name: "Student",
+  email: "student@college.edu",
+};
 
 const QUICK_PROMPTS = [
   {
@@ -33,9 +39,7 @@ const QUICK_PROMPTS = [
 ];
 
 function App() {
-  const [user, setUser] = useState(null);
-  const [nameInput, setNameInput] = useState("");
-  const [emailInput, setEmailInput] = useState("");
+  const [user, setUser] = useState(DEFAULT_USER);
 
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
@@ -51,97 +55,49 @@ function App() {
   const inputRef = useRef(null);
 
   /* -------------------------------------------------------
-     LOAD SAVED USER
+     INITIALIZE USER (AUTO LOGIN SILENTLY)
   ------------------------------------------------------- */
 
   useEffect(() => {
-    const savedUser = localStorage.getItem("college_ai_user");
+    async function initUser() {
+      const savedUser = localStorage.getItem("college_ai_user");
 
-    if (savedUser) {
+      if (savedUser) {
+        try {
+          setUser(JSON.parse(savedUser));
+          return;
+        } catch {
+          localStorage.removeItem("college_ai_user");
+        }
+      }
+
+      // Auto-register student profile on backend seamlessly
       try {
-        setUser(JSON.parse(savedUser));
-      } catch {
-        localStorage.removeItem("college_ai_user");
+        const response = await fetch(`${API_BASE}/auth/login`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            name: "Student",
+            email: "student@college.edu",
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setUser(data);
+          localStorage.setItem("college_ai_user", JSON.stringify(data));
+          setBackendOnline(true);
+        }
+      } catch (err) {
+        // Backend offline or starting up; DEFAULT_USER is used
       }
     }
+
+    initUser();
   }, []);
-
-  /* -------------------------------------------------------
-     LOAD CONVERSATIONS
-  ------------------------------------------------------- */
-
-  useEffect(() => {
-    if (!user?.user_id) return;
-
-    loadConversations();
-  }, [user]);
-
-  /* -------------------------------------------------------
-     AUTO SCROLL
-  ------------------------------------------------------- */
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "nearest",
-    });
-  }, [messages, loading]);
-
-  /* -------------------------------------------------------
-     LOGIN
-  ------------------------------------------------------- */
-
-  async function handleLogin(event) {
-    event.preventDefault();
-
-    if (!nameInput.trim() || !emailInput.trim()) return;
-
-    try {
-      const response = await fetch(`${API_BASE}/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify({
-          name: nameInput.trim(),
-          email: emailInput.trim(),
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Login failed");
-      }
-
-      const data = await response.json();
-
-      setUser(data);
-      localStorage.setItem("college_ai_user", JSON.stringify(data));
-
-      setNameInput("");
-      setEmailInput("");
-      setBackendOnline(true);
-    } catch (error) {
-      console.error(error);
-      setBackendOnline(false);
-      alert(
-        "Could not connect to the College AI backend.\n\nPlease make sure FastAPI is running on port 8000."
-      );
-    }
-  }
-
-  /* -------------------------------------------------------
-     LOGOUT
-  ------------------------------------------------------- */
-
-  function handleLogout() {
-    localStorage.removeItem("college_ai_user");
-
-    setUser(null);
-    setMessages([]);
-    setConversationId(null);
-    setConversations([]);
-  }
 
   /* -------------------------------------------------------
      LOAD USER CONVERSATIONS
@@ -173,6 +129,27 @@ function App() {
       console.log("Conversation loading skipped:", error);
     }
   }
+
+  /* -------------------------------------------------------
+     TRIGGER LOAD CONVERSATIONS
+  ------------------------------------------------------- */
+
+  useEffect(() => {
+    if (user?.user_id) {
+      loadConversations();
+    }
+  }, [user]);
+
+  /* -------------------------------------------------------
+     AUTO SCROLL TO BOTTOM
+  ------------------------------------------------------- */
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+    });
+  }, [messages, loading]);
 
   /* -------------------------------------------------------
      LOAD EXISTING CONVERSATION
@@ -493,7 +470,7 @@ function App() {
       <div className="welcome-screen">
         <div className="welcome-icon">✦</div>
 
-        <h1>Hello, Tanvi!</h1>
+        <h1>Hello, {user?.name || "Student"}!</h1>
 
         <p>
           What would you like to know about your college?
@@ -521,73 +498,7 @@ function App() {
     );
   }
 
-  /* -------------------------------------------------------
-     LOGIN SCREEN
-  ------------------------------------------------------- */
 
-  if (!user) {
-    return (
-      <div className="login-page">
-        <div className="login-card">
-          <div className="login-logo">🎓</div>
-
-          <div className="login-brand">
-            <h1>College AI</h1>
-            <p>Knowledge Base</p>
-          </div>
-
-          <div className="login-content">
-            <h2>Welcome to College AI</h2>
-
-            <p>
-              Ask questions and get answers from your
-              college documents.
-            </p>
-
-            <form onSubmit={handleLogin}>
-              <label>
-                Your Name
-                <input
-                  type="text"
-                  placeholder="Enter your name"
-                  value={nameInput}
-                  onChange={(event) =>
-                    setNameInput(event.target.value)
-                  }
-                  required
-                />
-              </label>
-
-              <label>
-                Email Address
-                <input
-                  type="email"
-                  placeholder="Enter your email"
-                  value={emailInput}
-                  onChange={(event) =>
-                    setEmailInput(event.target.value)
-                  }
-                  required
-                />
-              </label>
-
-              <button
-                type="submit"
-                className="login-button"
-              >
-                Continue to College AI
-                <span>→</span>
-              </button>
-            </form>
-          </div>
-
-          <div className="login-footer">
-            Answers are generated from your college documents.
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   /* -------------------------------------------------------
      MAIN APPLICATION
@@ -674,23 +585,24 @@ function App() {
         <div className="sidebar-bottom">
           <div className="profile">
             <div className="avatar">
-              {(user.name || "T")
+              {(user?.name || "S")
                 .charAt(0)
                 .toUpperCase()}
             </div>
 
             <div className="profile-info">
-              <strong>{user.name}</strong>
-              <span>{user.email}</span>
+              <strong>{user?.name || "Student"}</strong>
+              <span>{user?.email || "student@college.edu"}</span>
             </div>
           </div>
 
           <button
             className="logout-button"
-            onClick={handleLogout}
+            onClick={startNewConversation}
+            title="Start a new conversation"
           >
-            <span>↪</span>
-            Logout
+            <span>＋</span>
+            New Chat
           </button>
         </div>
       </aside>
